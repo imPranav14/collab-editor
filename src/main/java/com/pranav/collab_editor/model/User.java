@@ -1,5 +1,6 @@
 package com.pranav.collab_editor.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -32,5 +33,6 @@ public class User {
     private LocalDateTime createdAt;
 
     @OneToMany(mappedBy = "owner")
+    @JsonIgnore
     private List<Document> documents;
 }

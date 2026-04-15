@@ -25,20 +25,18 @@ public class DocumentController {
     private UserRepository userRepository;
 
     @GetMapping
-    public ResponseEntity<List<DocumentResponse>> listDocuments(Principal principal) {
+    public ResponseEntity<List<Document>> listDocuments(Principal principal) {
         Optional<User> userOpt = userRepository.findByUsername(principal.getName());
         if (userOpt.isEmpty()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
-        List<DocumentResponse> documents = documentRepository.findByOwner(userOpt.get()).stream()
-                .map(doc -> new DocumentResponse(doc.getId(), doc.getTitle()))
-                .collect(Collectors.toList());
+        List<Document> documents = documentRepository.findByOwner(userOpt.get());
         return ResponseEntity.ok(documents);
     }
 
     @PostMapping
-    public ResponseEntity<DocumentResponse> createDocument(@RequestBody CreateDocumentRequest request,
+    public ResponseEntity<Document> createDocument(@RequestBody CreateDocumentRequest request,
                                                            Principal principal) {
         Optional<User> userOpt = userRepository.findByUsername(principal.getName());
         if (userOpt.isEmpty()) {
@@ -51,11 +49,11 @@ public class DocumentController {
         documentRepository.save(doc);
 
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(new DocumentResponse(doc.getId(), doc.getTitle()));
+                .body(doc);
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<DocumentResponse> getDocument(@PathVariable String id, Principal principal) {
+    public ResponseEntity<Document> getDocument(@PathVariable String id, Principal principal) {
         Optional<User> userOpt = userRepository.findByUsername(principal.getName());
         if (userOpt.isEmpty()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
@@ -71,7 +69,7 @@ public class DocumentController {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         }
 
-        return ResponseEntity.ok(new DocumentResponse(document.getId(), document.getTitle()));
+        return ResponseEntity.ok(document);
     }
 
     @DeleteMapping("/{id}")
@@ -96,5 +94,4 @@ public class DocumentController {
     }
 
     public record CreateDocumentRequest(String title) {}
-    public record DocumentResponse(String id, String title) {}
 }
