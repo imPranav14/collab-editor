@@ -2,6 +2,9 @@ package com.pranav.collab_editor.service;
 
 import com.pranav.collab_editor.model.User;
 import com.pranav.collab_editor.repository.UserRepository;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -54,7 +57,26 @@ public class AuthService {
         return new AuthResponse(token, null);
     }
 
-    public static record RegisterRequest(String username, String email, String password) {}
-    public static record LoginRequest(String username, String password) {}
+    public static record RegisterRequest(
+            @NotBlank(message = "Username is required")
+            @Size(min = 3, max = 20, message = "Username must be 3-20 characters")
+            String username,
+
+            @Email(message = "Invalid email format")
+            @NotBlank(message = "Email is required")
+            String email,
+
+            @NotBlank(message = "Password is required")
+            @Size(min = 3, message = "Password must be at least 3 characters")
+            String password
+    ) {}
+
+    public static record LoginRequest(
+            @NotBlank(message = "Username is required")
+            String username,
+
+            @NotBlank(message = "Password is required")
+            String password
+    ) {}
     public static record AuthResponse(String token, String error) {}
 }

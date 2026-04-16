@@ -1,6 +1,7 @@
 package com.pranav.collab_editor.controller;
 
 import com.pranav.collab_editor.service.AuthService;
+import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -17,7 +18,7 @@ public class AuthController {
     private AuthService authService;
 
     @PostMapping("/register")
-    public ResponseEntity<AuthService.AuthResponse> register(@RequestBody AuthService.RegisterRequest request) {
+    public ResponseEntity<AuthService.AuthResponse> register(@Valid @RequestBody AuthService.RegisterRequest request) {
         AuthService.AuthResponse response = authService.register(request);
         if (response.error() != null) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
@@ -26,7 +27,7 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<AuthService.AuthResponse> login(@RequestBody AuthService.LoginRequest request) {
+    public ResponseEntity<AuthService.AuthResponse> login(@Valid @RequestBody AuthService.LoginRequest request) {
         AuthService.AuthResponse response = authService.login(request);
         if (response.error() != null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(response);
