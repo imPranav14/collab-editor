@@ -78,5 +78,6 @@ public class AuthService {
             @NotBlank(message = "Password is required")
             String password
     ) {}
+    
     public static record AuthResponse(String token, String error) {}
 }
