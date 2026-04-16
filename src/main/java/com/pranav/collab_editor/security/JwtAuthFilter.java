@@ -1,5 +1,7 @@
 package com.pranav.collab_editor.security;
 
+import com.pranav.collab_editor.model.User;
+import com.pranav.collab_editor.repository.UserRepository;
 import com.pranav.collab_editor.service.JwtService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -12,12 +14,16 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.util.Optional;
 
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     @Autowired
     private JwtService jwtService;
+
+    @Autowired
+    private UserRepository userRepository;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
@@ -37,10 +43,15 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                     String username = jwtService.extractUsername(token);
                     
                     if (username != null) {
-                        // Create authentication object and set it in the security context
-                        UsernamePasswordAuthenticationToken auth = 
-                            new UsernamePasswordAuthenticationToken(username, null, null);
-                        SecurityContextHolder.getContext().setAuthentication(auth);
+                        Optional<User> userOpt = userRepository.findByUsername(username);
+                        if (userOpt.isPresent()) {
+                            User user = userOpt.get();
+                            UsernamePasswordAuthenticationToken auth = 
+                                new UsernamePasswordAuthenticationToken(user, null, null);
+                            SecurityContextHolder.getContext().setAuthentication(auth);
+                        } else {
+                            logger.warn("Authenticated username not found in database: " + username);
+                        }
                     }
                 } else {
                     logger.warn("Token validation failed: " + validationResult);
