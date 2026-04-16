@@ -31,7 +31,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 String token = authHeader.substring(7);  // Remove "Bearer " prefix
                 
                 // Validate token
-                if (jwtService.validateToken(token)) {
+                String validationResult = jwtService.validateToken(token);
+                if (validationResult == null) {
                     // Extract username from token
                     String username = jwtService.extractUsername(token);
                     
@@ -41,6 +42,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                             new UsernamePasswordAuthenticationToken(username, null, null);
                         SecurityContextHolder.getContext().setAuthentication(auth);
                     }
+                } else {
+                    logger.warn("Token validation failed: " + validationResult);
                 }
             }
         } catch (Exception e) {

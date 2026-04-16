@@ -1,8 +1,11 @@
 package com.pranav.collab_editor.service;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.MalformedJwtException;
 import io.jsonwebtoken.security.Keys;
+import io.jsonwebtoken.security.SignatureException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -47,15 +50,21 @@ public class JwtService {
         }
     }
 
-    public boolean validateToken(String token) {
+    public String validateToken(String token) {
         try {
             Jwts.parser()
                     .verifyWith(getSigningKey())
                     .build()
                     .parseSignedClaims(token);
-            return true;
+            return null; // valid
+        } catch (ExpiredJwtException e) {
+            return "Token has expired";
+        } catch (MalformedJwtException e) {
+            return "Token is malformed";
+        } catch (SignatureException e) {
+            return "Token signature is invalid";
         } catch (Exception e) {
-            return false;
+            return "Token is invalid: " + e.getMessage();
         }
     }
 }
