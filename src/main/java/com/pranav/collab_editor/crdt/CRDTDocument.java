@@ -53,35 +53,22 @@ public class CRDTDocument {
     }
 
     private void applyInsert(CRDTOperation op) {
-        if (nodeIndex.containsKey(op.getNodeId())) {
-            return;
-        }
-
         CRDTNode node = new CRDTNode(op.getNodeId(), op.getCharValue(), op.getLeftId());
 
         int insertIndex = 0;
 
         if (op.getLeftId() != null) {
             int leftIndex = findNodeIndex(op.getLeftId());
-            if (leftIndex < 0) {
-                // Should be rare if buffering works correctly, but keep safe
-                waitingOn.computeIfAbsent(op.getLeftId(), k -> new ArrayList<>()).add(op);
-                return;
-            }
             insertIndex = leftIndex + 1;
         }
 
-        // Deterministic sibling ordering:
-        // This runs for BOTH leftId == null and leftId != null.
         while (insertIndex < nodes.size()) {
             CRDTNode next = nodes.get(insertIndex);
 
-            // Only compare against nodes that share the same leftId
             if (!Objects.equals(next.getLeftId(), op.getLeftId())) {
                 break;
             }
 
-            // Zero-padded Lamport IDs can be compared directly as strings
             if (next.getId().compareTo(op.getNodeId()) > 0) {
                 break;
             }
@@ -91,8 +78,6 @@ public class CRDTDocument {
 
         nodes.add(insertIndex, node);
         nodeIndex.put(node.getId(), node);
-
-        // Update positions for the inserted node and all shifted nodes
         refreshPositionIndexFrom(insertIndex);
     }
 
