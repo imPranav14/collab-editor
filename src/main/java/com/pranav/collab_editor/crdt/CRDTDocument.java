@@ -81,8 +81,8 @@ public class CRDTDocument {
                 break;
             }
 
-            // Tie-break by node ID so all clients converge
-            if (compareNodeIds(next.getId(), op.getNodeId()) > 0) {
+            // Zero-padded Lamport IDs can be compared directly as strings
+            if (next.getId().compareTo(op.getNodeId()) > 0) {
                 break;
             }
 
@@ -174,45 +174,5 @@ public class CRDTDocument {
         for (int i = startIndex; i < nodes.size(); i++) {
             positionIndex.put(nodes.get(i).getId(), i);
         }
-    }
-
-    /**
-     * Compares node IDs in a way that is stable for Lamport-style IDs.
-     *
-     * Expected format examples:
-     *   clientA:0000000012
-     *   clientB:0000000007
-     *
-     * If the suffix is numeric, compare numerically.
-     * If parsing fails, fall back to lexicographic comparison.
-     */
-    private int compareNodeIds(String idA, String idB) {
-        if (Objects.equals(idA, idB)) {
-            return 0;
-        }
-
-        try {
-            String[] partsA = splitNodeId(idA);
-            String[] partsB = splitNodeId(idB);
-
-            int clientCmp = partsA[0].compareTo(partsB[0]);
-            if (clientCmp != 0) {
-                return clientCmp;
-            }
-
-            long clockA = Long.parseLong(partsA[1]);
-            long clockB = Long.parseLong(partsB[1]);
-            return Long.compare(clockA, clockB);
-        } catch (Exception e) {
-            return idA.compareTo(idB);
-        }
-    }
-
-    private String[] splitNodeId(String id) {
-        int idx = id.lastIndexOf(':');
-        if (idx < 0 || idx == id.length() - 1) {
-            return new String[]{id, "0"};
-        }
-        return new String[]{id.substring(0, idx), id.substring(idx + 1)};
     }
 }
