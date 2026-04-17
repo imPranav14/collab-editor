@@ -3,20 +3,21 @@ package com.pranav.collab_editor.crdt;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
-import java.util.HashSet;
 
 public class CRDTDocument {
 
     private final List<CRDTNode> nodes = new ArrayList<>();
     private final Map<String, CRDTNode> nodeIndex = new HashMap<>();
+    private final Map<String, Integer> positionIndex = new HashMap<>();
 
-    // Waiting inserts grouped by the leftId they depend on
+    // Inserts waiting for their leftId to exist
     private final Map<String, List<CRDTOperation>> waitingOn = new HashMap<>();
 
     // Deletes that arrived before the target node
@@ -72,7 +73,6 @@ public class CRDTDocument {
 
         // Deterministic sibling ordering:
         // This runs for BOTH leftId == null and leftId != null.
-        // That fixes concurrent inserts at document start too.
         while (insertIndex < nodes.size()) {
             CRDTNode next = nodes.get(insertIndex);
 
@@ -81,7 +81,7 @@ public class CRDTDocument {
                 break;
             }
 
-            // Deterministic tie-breaker by node ID
+            // Tie-break by node ID so all clients converge
             if (compareNodeIds(next.getId(), op.getNodeId()) > 0) {
                 break;
             }
@@ -91,6 +91,9 @@ public class CRDTDocument {
 
         nodes.add(insertIndex, node);
         nodeIndex.put(node.getId(), node);
+
+        // Update positions for the inserted node and all shifted nodes
+        refreshPositionIndexFrom(insertIndex);
     }
 
     public synchronized void delete(CRDTOperation op) {
@@ -138,7 +141,7 @@ public class CRDTDocument {
                     // This inserted node may unlock more operations
                     ready.add(pendingOp.getNodeId());
                 } else {
-                    // Still blocked; put it back under its missing dependency
+                    // Still blocked, put it back
                     waitingOn.computeIfAbsent(pendingOp.getLeftId(), k -> new ArrayList<>()).add(pendingOp);
                 }
             }
@@ -164,12 +167,13 @@ public class CRDTDocument {
     }
 
     private int findNodeIndex(String nodeId) {
-        for (int i = 0; i < nodes.size(); i++) {
-            if (nodes.get(i).getId().equals(nodeId)) {
-                return i;
-            }
+        return positionIndex.getOrDefault(nodeId, -1);
+    }
+
+    private void refreshPositionIndexFrom(int startIndex) {
+        for (int i = startIndex; i < nodes.size(); i++) {
+            positionIndex.put(nodes.get(i).getId(), i);
         }
-        return -1;
     }
 
     /**
