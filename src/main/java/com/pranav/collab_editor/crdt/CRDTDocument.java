@@ -16,10 +16,10 @@ public class CRDTDocument {
     private final List<CRDTNode> nodes = new ArrayList<>();
     private final Map<String, CRDTNode> nodeIndex = new HashMap<>();
 
-    // O(1) position lookup — maintained by refreshPositionIndexFrom() after every insert
+    // O(1) position lookup — updated by refreshPositionIndexFrom() after every insert
     private final Map<String, Integer> positionIndex = new HashMap<>();
 
-    // Inserts waiting for their leftId to exist in nodeIndex
+    // Inserts waiting for their leftId to appear in nodeIndex
     private final Map<String, List<CRDTOperation>> waitingOn = new HashMap<>();
 
     // Deletes that arrived before their target node existed
@@ -34,7 +34,7 @@ public class CRDTDocument {
             throw new IllegalArgumentException("Operation must be INSERT");
         }
 
-        // Idempotent: ignore duplicate ops (can arrive from network replay)
+        // Idempotent: ignore duplicates (can arrive from network replay)
         if (nodeIndex.containsKey(op.getNodeId())) {
             return;
         }
@@ -98,32 +98,48 @@ public class CRDTDocument {
     private void applyInsert(CRDTOperation op) {
         CRDTNode node = new CRDTNode(op.getNodeId(), op.getCharValue(), op.getLeftId());
 
-        // Start scanning from just after the left neighbour (or from 0 if no left neighbour)
+        // Start just after the left neighbour (or at position 0 if no left neighbour)
         int insertIndex = 0;
         if (op.getLeftId() != null) {
             int leftIndex = findNodeIndex(op.getLeftId());
             insertIndex = leftIndex + 1;
         }
 
-        // Resolve concurrent siblings: multiple nodes with the same leftId
-        // were inserted at the same position simultaneously.
-        // We use compareNodeIds() as a deterministic, stable tiebreaker so that
-        // ALL clients resolve ties to the same ordering regardless of arrival order.
+        // ── Sibling resolution ────────────────────────────────────────────────
         //
-        // Rule: scan right while the next node is a sibling AND sorts before us.
-        // Stop as soon as we find a node that should come AFTER us.
+        // The scan considers two kinds of nodes:
+        //
+        // 1. DIRECT SIBLINGS — nodes whose leftId equals op.leftId.
+        //    Concurrent inserts at the same position.
+        //    Resolved by compareNodeIds(): whichever has the larger ID goes first.
+        //    We stop when we find a sibling whose ID is larger than ours.
+        //
+        // 2. NON-SIBLINGS — nodes whose leftId differs from op.leftId.
+        //    These are children (or deeper descendants) of some prior sibling.
+        //    Example: B (leftId=A) when we insert X (leftId=null) and A < X.
+        //    B belongs to A's subtree and must stay BEFORE X.
+        //    We call belongsToSubtreeBefore() to detect this case.
+        //    If yes  → skip past the node (it's part of an earlier subtree).
+        //    If no   → stop here (we go before this node).
+        //
+        // Without this subtree check, concurrent sequences A→B and X→Y can
+        // interleave into A,X,B,Y instead of the correct A,B,X,Y — a genuine
+        // convergence bug where two clients end up with different documents.
+        // ─────────────────────────────────────────────────────────────────────
+
         while (insertIndex < nodes.size()) {
             CRDTNode next = nodes.get(insertIndex);
 
-            // Not a sibling — different left neighbour, so we've passed the sibling group
-            if (!Objects.equals(next.getLeftId(), op.getLeftId())) {
-                break;
-            }
-
-            // Same sibling group: the node with the "larger" ID wins and goes first.
-            // If the next node's ID is greater than ours we stop — we go before it.
-            if (compareNodeIds(next.getId(), op.getNodeId()) > 0) {
-                break;
+            if (Objects.equals(next.getLeftId(), op.getLeftId())) {
+                // Direct sibling — higher ID goes first
+                if (compareNodeIds(next.getId(), op.getNodeId()) > 0) {
+                    break; // next beats us — we go before it
+                }
+            } else {
+                // Non-sibling — only skip if it belongs to an earlier subtree
+                if (!belongsToSubtreeBefore(next, op.getLeftId(), op.getNodeId())) {
+                    break;
+                }
             }
 
             insertIndex++;
@@ -132,9 +148,44 @@ public class CRDTDocument {
         nodes.add(insertIndex, node);
         nodeIndex.put(node.getId(), node);
 
-        // Update the O(1) position cache for the new node and every node after it
-        // (they all shifted right by one due to the insertion)
+        // Update O(1) position cache for the new node and all nodes that shifted right
         refreshPositionIndexFrom(insertIndex);
+    }
+
+    /**
+     * Returns true if {@code next} is a descendant of a prior sibling of the
+     * node being inserted, meaning it belongs to a subtree that should appear
+     * BEFORE the new node in the document.
+     *
+     * <p><b>Why this matters:</b><br>
+     * Suppose we are inserting node O (leftId=L), and we encounter node N whose
+     * leftId is not L.  N is a child of some ancestor P.  If P is a sibling of O
+     * (P.leftId == L) and P sorts before O (compareNodeIds(P.id, O.id) &lt; 0),
+     * then N — and the entire subtree rooted at P — must appear before O.
+     * We skip past N.
+     *
+     * <p>If no such ancestor exists, O goes here (we stop scanning).
+     *
+     * @param next       the candidate node currently under inspection
+     * @param opLeftId   the leftId of the node being inserted
+     * @param opNodeId   the nodeId of the node being inserted (for tiebreaking)
+     */
+    private boolean belongsToSubtreeBefore(CRDTNode next, String opLeftId, String opNodeId) {
+        String current = next.getLeftId();
+        while (current != null) {
+            CRDTNode ancestor = nodeIndex.get(current);
+            if (ancestor == null) {
+                return false;
+            }
+            if (Objects.equals(ancestor.getLeftId(), opLeftId)) {
+                // `ancestor` is a direct sibling of op
+                // It precedes op only if its own ID < op's ID
+                return compareNodeIds(current, opNodeId) < 0;
+            }
+            current = ancestor.getLeftId();
+        }
+        // Reached document root without finding a common sibling parent
+        return false;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -142,8 +193,8 @@ public class CRDTDocument {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * BFS through the waitingOn map, using the newly-available nodeId as the
-     * starting seed. Each op that becomes unblocked may in turn unblock more ops.
+     * BFS through waitingOn using the newly-inserted nodeId as the seed.
+     * Each op that becomes unblocked may cascade and unblock further ops.
      */
     private void replayWaitingOperations(String newlyAvailableNodeId) {
         Queue<String> ready = new LinkedList<>();
@@ -158,16 +209,13 @@ public class CRDTDocument {
             }
 
             for (CRDTOperation pendingOp : waiting) {
-                // Guard against the (rare) case of a duplicate arriving via replay
                 if (nodeIndex.containsKey(pendingOp.getNodeId())) {
-                    continue;
+                    continue; // already inserted (duplicate)
                 }
 
-                // leftId is available — go ahead and insert
                 if (pendingOp.getLeftId() == null || nodeIndex.containsKey(pendingOp.getLeftId())) {
                     applyInsert(pendingOp);
 
-                    // Apply any pending delete for this newly inserted node
                     if (pendingDeletes.remove(pendingOp.getNodeId())) {
                         CRDTNode inserted = nodeIndex.get(pendingOp.getNodeId());
                         if (inserted != null) {
@@ -175,10 +223,9 @@ public class CRDTDocument {
                         }
                     }
 
-                    // This node may unblock yet more buffered ops
                     ready.add(pendingOp.getNodeId());
                 } else {
-                    // Still waiting on a different dependency — re-buffer under the real key
+                    // Still blocked — re-buffer under the correct dependency key
                     waitingOn.computeIfAbsent(pendingOp.getLeftId(), k -> new ArrayList<>())
                              .add(pendingOp);
                 }
@@ -196,11 +243,11 @@ public class CRDTDocument {
 
     /**
      * Refresh the O(1) position cache from startIndex to end-of-list.
-     * Must be called after every insertion — everything at startIndex and beyond
-     * has shifted right by one.
+     * Must be called after every insertion since everything at startIndex+
+     * shifted right by one.
      *
-     * For sequential appends (the common case when typing) startIndex == nodes.size()-1,
-     * so this loop runs exactly once and the whole operation is O(1).
+     * For sequential appends (common when typing) startIndex is the last slot,
+     * so this loop runs exactly once and is effectively O(1).
      */
     private void refreshPositionIndexFrom(int startIndex) {
         for (int i = startIndex; i < nodes.size(); i++) {
@@ -211,17 +258,16 @@ public class CRDTDocument {
     /**
      * Deterministic, stable comparator for CRDT node IDs.
      *
-     * Node IDs have the format  "clientId:lamportClock"  e.g. "userA:42".
+     * <p>Node IDs have the format {@code "clientId:lamportClock"}, e.g. {@code "userA:42"}.
      *
-     * WHY NOT String.compareTo()?
-     * Plain lexicographic comparison breaks for multi-digit clocks:
-     *   "A:10".compareTo("A:9")  →  negative  (because '1' < '9')
-     * This means clock 10 sorts BEFORE clock 9, which is wrong.
-     * All clients still converge (the comparison is at least consistent), but
-     * the sibling ordering would be counter-intuitive and fragile.
+     * <p><b>Why not {@code String.compareTo()}?</b><br>
+     * Plain lexicographic comparison breaks for multi-digit clocks:<br>
+     * {@code "A:10".compareTo("A:9")} is negative because {@code '1' < '9'},
+     * so clock-10 would sort before clock-9.  All clients still converge (the
+     * comparison is consistent), but the ordering is wrong and fragile across
+     * clock-digit boundaries.
      *
-     * This method compares by (clientId ASC, lamportClock ASC) using the
-     * numeric value of the clock, which is both correct and intuitive.
+     * <p>This method compares by (clientId ASC, lamportClock numerically ASC).
      */
     static int compareNodeIds(String idA, String idB) {
         int colonA = idA.lastIndexOf(':');
