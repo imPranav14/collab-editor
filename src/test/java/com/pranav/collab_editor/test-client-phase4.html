@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CollabEdit — Phase 4 WebSocket Test Client</title>
+
+    <!-- SockJS: WebSocket with fallback transport -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+    <!-- STOMP.js: messaging protocol over SockJS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+
+    <style>
+        body { font-family: monospace; padding: 24px; background: #0f0f0f; color: #e0e0e0; }
+        h2   { color: #7dd3fc; margin-bottom: 4px; }
+        p    { color: #94a3b8; margin-top: 0; }
+
+        .row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+
+        input, select {
+            background: #1e1e1e; border: 1px solid #334155;
+            color: #e0e0e0; padding: 6px 10px; border-radius: 4px;
+            font-family: monospace; font-size: 13px;
+        }
+
+        button {
+            padding: 7px 14px; border: none; border-radius: 4px;
+            cursor: pointer; font-family: monospace; font-size: 13px;
+            font-weight: 600;
+        }
+        .btn-green  { background: #16a34a; color: #fff; }
+        .btn-red    { background: #dc2626; color: #fff; }
+        .btn-blue   { background: #2563eb; color: #fff; }
+        .btn-orange { background: #d97706; color: #fff; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        #status {
+            display: inline-block; padding: 4px 12px;
+            border-radius: 12px; font-size: 12px; font-weight: bold;
+            background: #450a0a; color: #fca5a5;
+        }
+        #status.connected { background: #14532d; color: #86efac; }
+
+        #doc-display {
+            background: #1e1e1e; border: 1px solid #334155;
+            padding: 14px; border-radius: 6px;
+            min-height: 40px; font-size: 16px;
+            color: #fde68a; letter-spacing: 1px;
+            margin-bottom: 16px;
+        }
+
+        #log {
+            background: #111827; border: 1px solid #1f2937;
+            padding: 12px; border-radius: 6px;
+            height: 240px; overflow-y: auto;
+            font-size: 12px; line-height: 1.6;
+        }
+        .log-recv   { color: #86efac; }
+        .log-send   { color: #93c5fd; }
+        .log-info   { color: #94a3b8; }
+        .log-error  { color: #fca5a5; }
+
+        label { font-size: 12px; color: #64748b; display: block; margin-bottom: 3px; }
+        hr    { border: none; border-top: 1px solid #1f2937; margin: 20px 0; }
+    </style>
+</head>
+<body>
+
+<h2>🔌 CollabEdit — WebSocket Test Client</h2>
+<p>Open this file in two separate browser tabs to test real-time sync.</p>
+
+<hr>
+
+<!-- ── Connection controls ── -->
+<div class="row">
+    <div>
+        <label>Client ID (your identity)</label>
+        <input id="clientId" value="client1" style="width:100px">
+    </div>
+    <div>
+        <label>Document ID</label>
+        <input id="docId" value="test-doc" style="width:120px">
+    </div>
+    <div style="display:flex;align-items:flex-end;gap:8px">
+        <button class="btn-green" id="btnConnect" onclick="connect()">Connect</button>
+        <button class="btn-red"   id="btnDisconnect" onclick="disconnect()" disabled>Disconnect</button>
+        <span id="status">Disconnected</span>
+    </div>
+</div>
+
+<hr>
+
+<!-- ── Document state ── -->
+<label>Current document text (as seen by this client):</label>
+<div id="doc-display">(empty)</div>
+
+<!-- ── Send operations ── -->
+<div class="row">
+    <div>
+        <label>Type</label>
+        <select id="opType" onchange="toggleFields()">
+            <option value="INSERT">INSERT</option>
+            <option value="DELETE">DELETE</option>
+        </select>
+    </div>
+    <div id="charField">
+        <label>Character</label>
+        <input id="charValue" value="H" style="width:40px" maxlength="1">
+    </div>
+    <div id="leftField">
+        <label>Left Node ID (null = start)</label>
+        <input id="leftId" value="" placeholder="null" style="width:130px">
+    </div>
+    <div>
+        <label>Node ID (auto-generated)</label>
+        <input id="nodeId" value="" placeholder="auto" style="width:130px">
+    </div>
+    <div style="display:flex;align-items:flex-end">
+        <button class="btn-blue" id="btnSend" onclick="sendOp()" disabled>Send Op</button>
+    </div>
+</div>
+
+<!-- ── Quick test buttons ── -->
+<div class="row" style="margin-top:8px">
+    <div style="display:flex;align-items:flex-end;gap:8px">
+        <button class="btn-orange" id="btnDemo" onclick="sendDemoSequence()" disabled>
+            Send "Hello" (5 ops)
+        </button>
+        <button class="btn-red" style="background:#6b21a8" id="btnClear" onclick="clearLog()">
+            Clear Log
+        </button>
+    </div>
+</div>
+
+<hr>
+
+<!-- ── Log ── -->
+<label>Event Log:</label>
+<div id="log"></div>
+
+
+<script>
+    // ── State ──────────────────────────────────────────────────────────────────
+    let stompClient = null;
+    let lamportClock = 0;
+
+    // Local CRDT — simplified version just for display in this test client.
+    // The real CRDT (CRDTDocument.java) lives in both the server and the
+    // full React frontend. Here we keep a simple ordered array for visibility.
+    const localNodes = [];   // { id, value, leftId, deleted }
+    const nodeIndex  = {};   // id → node
+
+    // ── Connection ─────────────────────────────────────────────────────────────
+
+    function connect() {
+        const docId    = document.getElementById('docId').value.trim();
+        const clientId = document.getElementById('clientId').value.trim();
+
+        if (!docId || !clientId) {
+            logMsg('error', 'Document ID and Client ID must not be empty.');
+            return;
+        }
+
+        logMsg('info', `Connecting to ws://localhost:8080/ws-collab as "${clientId}"...`);
+
+        const socket  = new SockJS('http://localhost:8080/ws-collab');
+        stompClient   = Stomp.over(socket);
+        stompClient.debug = null; // suppress STOMP debug noise in console
+
+        stompClient.connect({}, () => {
+            // ── Connected ──────────────────────────────────────────────
+            setConnected(true);
+            logMsg('info', `Connected. Subscribing to /topic/document/${docId}`);
+
+            // Subscribe to all ops for this document.
+            // Every op broadcast by the server arrives here — including
+            // ops sent by OTHER clients.
+            stompClient.subscribe(`/topic/document/${docId}`, (message) => {
+                const op = JSON.parse(message.body);
+                logMsg('recv', `← Received: ${JSON.stringify(op)}`);
+
+                // Apply op to the local simplified CRDT
+                applyOp(op);
+                renderDocument();
+            });
+
+        }, (error) => {
+            // ── Connection error ───────────────────────────────────────
+            setConnected(false);
+            logMsg('error', `Connection error: ${error}`);
+        });
+    }
+
+    function disconnect() {
+        if (stompClient) {
+            stompClient.disconnect(() => {
+                setConnected(false);
+                logMsg('info', 'Disconnected.');
+            });
+        }
+    }
+
+    // ── Sending operations ─────────────────────────────────────────────────────
+
+    function sendOp() {
+        const docId     = document.getElementById('docId').value.trim();
+        const clientId  = document.getElementById('clientId').value.trim();
+        const type      = document.getElementById('opType').value;
+        const charValue = document.getElementById('charValue').value || null;
+        const leftIdRaw = document.getElementById('leftId').value.trim();
+        const leftId    = leftIdRaw === '' ? null : leftIdRaw;
+        const nodeIdRaw = document.getElementById('nodeId').value.trim();
+
+        lamportClock++;
+        const nodeId = nodeIdRaw !== '' ? nodeIdRaw : `${clientId}:${lamportClock}`;
+
+        const op = {
+            type,
+            nodeId,
+            leftId,
+            charValue: type === 'INSERT' ? charValue : null,
+            clientId,
+            lamportClock
+        };
+
+        logMsg('send', `→ Sending:  ${JSON.stringify(op)}`);
+
+        // Send to the Spring Boot handler: @MessageMapping("/document/{docId}/op")
+        stompClient.send(`/app/document/${docId}/op`, {}, JSON.stringify(op));
+
+        // Auto-advance node ID hint for the next op
+        document.getElementById('nodeId').value = '';
+        document.getElementById('leftId').value = nodeId;
+    }
+
+    /**
+     * Sends 5 sequential INSERT ops to type "Hello".
+     * Good smoke test — open two tabs and click this in one;
+     * the other should display "Hello" immediately.
+     */
+    function sendDemoSequence() {
+        const clientId = document.getElementById('clientId').value.trim();
+        const docId    = document.getElementById('docId').value.trim();
+        const chars    = ['H', 'e', 'l', 'l', 'o'];
+        let   prevId   = null;
+
+        chars.forEach((ch, i) => {
+            setTimeout(() => {
+                lamportClock++;
+                const nodeId = `${clientId}:${lamportClock}`;
+                const op = {
+                    type: 'INSERT',
+                    nodeId,
+                    leftId: prevId,
+                    charValue: ch,
+                    clientId,
+                    lamportClock
+                };
+                logMsg('send', `→ Demo op ${i+1}/5: ${JSON.stringify(op)}`);
+                stompClient.send(`/app/document/${docId}/op`, {}, JSON.stringify(op));
+                prevId = nodeId;
+            }, i * 80); // small delay between ops so order is clear in the log
+        });
+    }
+
+    // ── Simplified local CRDT (for display only) ───────────────────────────────
+
+    function applyOp(op) {
+        if (op.type === 'INSERT') {
+            if (nodeIndex[op.nodeId]) return; // idempotent
+
+            const node = { id: op.nodeId, value: op.charValue, leftId: op.leftId, deleted: false };
+
+            let insertIdx = 0;
+            if (op.leftId) {
+                for (let i = 0; i < localNodes.length; i++) {
+                    if (localNodes[i].id === op.leftId) { insertIdx = i + 1; break; }
+                }
+            }
+
+            // Basic sibling tiebreaker (mirrors CRDTDocument.java logic)
+            while (insertIdx < localNodes.length) {
+                const next = localNodes[insertIdx];
+                if (next.leftId !== op.leftId) break;
+                if (compareIds(next.id, op.nodeId) > 0) break;
+                insertIdx++;
+            }
+
+            localNodes.splice(insertIdx, 0, node);
+            nodeIndex[op.nodeId] = node;
+
+        } else if (op.type === 'DELETE') {
+            const node = nodeIndex[op.nodeId];
+            if (node) node.deleted = true;
+        }
+    }
+
+    function compareIds(a, b) {
+        const [ca, la] = a.split(':');
+        const [cb, lb] = b.split(':');
+        if (ca !== cb) return ca < cb ? -1 : 1;
+        return parseInt(la) - parseInt(lb);
+    }
+
+    function renderDocument() {
+        const text = localNodes.filter(n => !n.deleted).map(n => n.value).join('');
+        const el = document.getElementById('doc-display');
+        el.textContent = text === '' ? '(empty)' : text;
+    }
+
+    // ── UI helpers ─────────────────────────────────────────────────────────────
+
+    function setConnected(connected) {
+        const status = document.getElementById('status');
+        status.textContent = connected ? 'Connected ✓' : 'Disconnected';
+        status.className   = connected ? 'connected' : '';
+        document.getElementById('btnConnect').disabled    = connected;
+        document.getElementById('btnDisconnect').disabled = !connected;
+        document.getElementById('btnSend').disabled       = !connected;
+        document.getElementById('btnDemo').disabled       = !connected;
+    }
+
+    function toggleFields() {
+        const isInsert = document.getElementById('opType').value === 'INSERT';
+        document.getElementById('charField').style.display = isInsert ? '' : 'none';
+        document.getElementById('leftField').style.display = isInsert ? '' : 'none';
+    }
+
+    function logMsg(type, text) {
+        const log = document.getElementById('log');
+        const ts  = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const div = document.createElement('div');
+        div.className = `log-${type}`;
+        div.textContent = `[${ts}] ${text}`;
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function clearLog() {
+        document.getElementById('log').innerHTML = '';
+    }
+</script>
+</body>
+</html>
