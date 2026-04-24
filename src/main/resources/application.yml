@@ -26,3 +26,12 @@ app:
     secret: your-secret-key-here-change-this-in-production 
     # secret: ${JWT_SECRET}  Then store actual secret in environment variable
     expiration-ms: 86400000
+
+# ── Logging — set CRDT and WebSocket packages to DEBUG during Phase 4 ──────────
+# This prints every op received and broadcast to the console so you can
+# see exactly what is happening during your manual tests.
+# Change to INFO (or remove) once Phase 4 is working.
+logging:
+  level:
+    com.pranav.collab_editor: DEBUG
+    org.springframework.web.socket: INFO   # set to DEBUG for raw STOMP frames
