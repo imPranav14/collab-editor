@@ -22,7 +22,7 @@ public class CRDTDocument {
     // Inserts waiting for their leftId to appear in nodeIndex
     private final Map<String, List<CRDTOperation>> waitingOn = new HashMap<>();
 
-    // Deletes that arrived before their target node existed
+    // Deletes that arrived before their target nodepq existed
     private final Set<String> pendingDeletes = new HashSet<>();
 
     // ─────────────────────────────────────────────────────────────────────────
