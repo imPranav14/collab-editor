@@ -5,83 +5,103 @@ import com.pranav.collab_editor.crdt.CRDTOperation;
 import com.pranav.collab_editor.dto.OperationDTO;
 import org.springframework.stereotype.Service;
 
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Server-side CRDT state manager.
  *
- * The server maintains one CRDTDocument per active document in memory.
+ * Maintains one CRDTDocument per active document in memory.
  * Every operation received from any client is applied here so the server
- * always holds the current authoritative document state.
+ * always holds the current authoritative in-memory document state.
  *
- * This serves two purposes:
- *   1. The server can reconstruct the full document text at any time
- *      (needed for snapshots in Phase 9 and initial load in Phase 5).
- *   2. The server validates that operations are structurally well-formed
- *      before broadcasting them to other clients.
+ * Phase 4: documents started empty and were never reloaded after restart.
+ * Phase 5: documents are loaded from the PostgreSQL operation log on first
+ *           access via replayAll() in OperationService, then cached here.
  *
  * Thread safety:
- *   ConcurrentHashMap ensures safe concurrent access to the activeDocuments map
- *   when multiple WebSocket handler threads process ops for different documents.
- *   Each CRDTDocument's insert() and delete() methods are synchronized internally,
- *   so concurrent ops for the SAME document are also safe.
+ *   ConcurrentHashMap makes activeDocuments map safe for concurrent threads.
+ *   Each CRDTDocument's insert() and delete() are synchronized internally.
  */
 @Service
 public class CRDTService {
 
     /**
      * In-memory store of active documents.
-     * Key:   documentId (UUID string)
-     * Value: the live CRDTDocument for that document
+     * Key:   documentId (String)
+     * Value: the live CRDTDocument
      *
-     * Documents are lazily initialized on first access.
-     * In Phase 5, documents will be loaded from the PostgreSQL operation log
-     * instead of starting empty.
+     * Phase 4: populated lazily on first WebSocket op (always starts empty).
+     * Phase 5: populated by loadDocument() after replaying the op log,
+     *           OR lazily if a WebSocket op arrives before the document is loaded.
      */
     private final Map<String, CRDTDocument> activeDocuments = new ConcurrentHashMap<>();
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Core apply — called from CollabController on every incoming WebSocket op
+    // ─────────────────────────────────────────────────────────────────────────
+
     /**
-     * Applies an operation to the server-side CRDT for the given document.
+     * Applies an operation to the server-side in-memory CRDT.
      *
-     * If no CRDTDocument exists for this docId yet, one is created (lazy init).
-     * The OperationDTO is converted to a CRDTOperation and applied to the document.
+     * If the document is not yet in memory (e.g. the server just restarted
+     * and a WebSocket op arrived before the REST load endpoint was called),
+     * a new empty CRDTDocument is created. The persisted ops will be replayed
+     * when the client calls GET /api/documents/{id}.
      *
-     * @param docId the document this operation belongs to
-     * @param op    the operation to apply (INSERT or DELETE)
-     * @throws IllegalArgumentException if op.type is not INSERT or DELETE
+     * @param docId the document to apply the op to
+     * @param dto   the operation received from the WebSocket client
      */
-    public void apply(String docId, OperationDTO op) {
-        // Get existing document or create a fresh one for this docId
+    public void apply(String docId, OperationDTO dto) {
         CRDTDocument doc = activeDocuments.computeIfAbsent(docId, id -> new CRDTDocument());
 
-        // Convert the DTO (wire format) to the internal CRDTOperation
         CRDTOperation crdtOp = new CRDTOperation(
-                op.getType(),
-                op.getNodeId(),
-                op.getLeftId(),
-                op.getCharValue(),
-                op.getClientId(),
-                op.getLamportClock()
+                dto.getType(),
+                dto.getNodeId(),
+                dto.getLeftId(),
+                dto.getCharValue(),
+                dto.getClientId(),
+                dto.getLamportClock()
         );
 
-        if ("INSERT".equals(op.getType())) {
+        if ("INSERT".equals(dto.getType())) {
             doc.insert(crdtOp);
-        } else if ("DELETE".equals(op.getType())) {
+        } else if ("DELETE".equals(dto.getType())) {
             doc.delete(crdtOp);
         } else {
-            throw new IllegalArgumentException("Unknown operation type: " + op.getType());
+            throw new IllegalArgumentException("Unknown operation type: " + dto.getType());
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cache management — called from OperationService after replaying op log
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Stores a pre-built CRDTDocument in the in-memory cache.
+     *
+     * Called by OperationService.replayAll() after it has replayed the full
+     * PostgreSQL operation log into a fresh CRDTDocument. This makes the
+     * document immediately available for subsequent WebSocket ops without
+     * another DB round-trip.
+     *
+     * @param docId    the document ID
+     * @param document the fully replayed CRDTDocument
+     */
+    public void loadDocument(String docId, CRDTDocument document) {
+        activeDocuments.put(docId, document);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Read helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
     /**
      * Returns the current visible text of the document.
-     * Returns an empty string if no document exists for this docId yet.
-     *
-     * Useful for debugging and will be used in Phase 9 for snapshots.
+     * Returns an empty string if the document is not loaded in memory.
      *
      * @param docId the document to get text for
-     * @return the current text content, or "" if not loaded
+     * @return current text content or "" if not loaded
      */
     public String getText(String docId) {
         CRDTDocument doc = activeDocuments.get(docId);
@@ -89,31 +109,30 @@ public class CRDTService {
     }
 
     /**
-     * Returns the CRDTDocument for a given docId, or null if not loaded.
-     * Will be used in Phase 5 when loading documents from the operation log.
+     * Returns the CRDTDocument for the given docId, or null if not loaded.
      *
      * @param docId the document ID
-     * @return the live CRDTDocument, or null
+     * @return the live CRDTDocument or null
      */
     public CRDTDocument getDocument(String docId) {
         return activeDocuments.get(docId);
     }
 
     /**
-     * Loads a document into memory from an already-constructed CRDTDocument.
-     * Will be called from Phase 5 when replaying the operation log on startup.
+     * Returns true if the document is currently held in memory.
+     * Useful for deciding whether to replay the op log before applying a new op.
      *
-     * @param docId    the document ID
-     * @param document the pre-built CRDTDocument
+     * @param docId the document ID
+     * @return true if loaded in memory
      */
-    public void loadDocument(String docId, CRDTDocument document) {
-        activeDocuments.put(docId, document);
+    public boolean isLoaded(String docId) {
+        return activeDocuments.containsKey(docId);
     }
 
     /**
-     * Removes a document from memory (e.g. when all users disconnect).
-     * The operation log in PostgreSQL (Phase 5) is the permanent store;
-     * this just frees up memory for inactive documents.
+     * Removes a document from memory.
+     * The operation log in PostgreSQL is the permanent record.
+     * This just frees RAM for inactive documents.
      *
      * @param docId the document to evict
      */

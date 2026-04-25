@@ -2,6 +2,7 @@ package com.pranav.collab_editor.controller;
 
 import com.pranav.collab_editor.dto.OperationDTO;
 import com.pranav.collab_editor.service.CRDTService;
+import com.pranav.collab_editor.service.OperationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -14,76 +15,66 @@ import org.springframework.stereotype.Controller;
 /**
  * WebSocket message handler for real-time collaborative editing.
  *
- * This controller handles the core real-time sync loop:
- *   1. A client sends a CRDT operation (INSERT or DELETE)
- *   2. The server applies it to the server-side CRDT (for consistency)
- *   3. The server broadcasts it to ALL clients on the same document
- *      (including the sender — the client handles deduplication)
+ * Phase 4: received op → apply to in-memory CRDT → broadcast.
+ * Phase 5: received op → apply to in-memory CRDT → PERSIST TO DB → broadcast.
  *
- * Why broadcast back to the sender too?
- *   The sender applied the op optimistically already. Receiving it back
- *   acts as a server acknowledgement. The client's CRDT is idempotent
- *   (duplicate ops are safely ignored), so this causes no issues.
+ * The persistence step (step 2) is intentionally placed BEFORE the broadcast
+ * (step 3). If the DB write fails, the exception propagates and the broadcast
+ * never happens. This prevents clients from applying an op that the server
+ * failed to record — keeping in-memory state and persisted state in sync.
  *
- * Destination conventions:
- *   Client sends to:      /app/document/{docId}/op
- *   Server broadcasts to: /topic/document/{docId}
- *
- *   The /app prefix is stripped by Spring before matching @MessageMapping.
- *   So @MessageMapping("/document/{docId}/op") matches /app/document/{docId}/op.
+ * If we broadcast first and then the DB write fails, clients would have an
+ * op in their local CRDT that doesn't exist in the operation log. On the next
+ * document load, those clients would see a different document than others.
  */
 @Controller
 public class CollabController {
 
     private static final Logger log = LoggerFactory.getLogger(CollabController.class);
 
-    /**
-     * Applies ops to the server-side in-memory CRDT.
-     * Maintains one CRDTDocument per active document.
-     */
     @Autowired
     private CRDTService crdtService;
 
-    /**
-     * Sends messages to specific STOMP destinations.
-     * Used here to broadcast ops to all subscribers of a document topic.
-     */
+    @Autowired
+    private OperationService operationService;   // ← added in Phase 5
+
     @Autowired
     private SimpMessagingTemplate messagingTemplate;
 
     /**
-     * Handles an incoming CRDT operation from a client.
+     * Handles an incoming CRDT operation from a WebSocket client.
      *
      * Flow:
-     *   1. Receive OperationDTO from /app/document/{docId}/op
-     *   2. Apply it to the server-side CRDT for document docId
-     *   3. Broadcast the same op to /topic/document/{docId}
-     *      (all subscribers, including the sender, receive it)
+     *   1. Client sends OperationDTO to /app/document/{docId}/op
+     *   2. Apply to server-side in-memory CRDT
+     *   3. Persist to PostgreSQL operations table   ← Phase 5 addition
+     *   4. Broadcast to /topic/document/{docId}
      *
-     * In Phase 5 (Persistence), step 2.5 will be added:
-     *   2.5 Persist the op to the PostgreSQL operation log
-     *
-     * @param docId  the document ID extracted from the destination URL
-     * @param op     the CRDT operation sent by the client (auto-deserialized from JSON)
+     * @param docId the document ID from the destination URL
+     * @param op    the CRDT operation (auto-deserialized from JSON by Spring)
      */
     @MessageMapping("/document/{docId}/op")
     public void handleOperation(
             @DestinationVariable String docId,
             @Payload OperationDTO op) {
 
-        log.debug("Received {} op for doc={} nodeId={} from client={}",
+        log.debug("Received {} op — doc={} nodeId={} client={}",
                 op.getType(), docId, op.getNodeId(), op.getClientId());
 
-        // Step 1 — Apply the operation to the server-side CRDT.
-        // This keeps the server in sync with all clients and lets it
-        // reconstruct the full document text at any time.
+        // Step 1 — Apply to server-side in-memory CRDT
+        // Keeps the server's document state current so getText() is always accurate.
         crdtService.apply(docId, op);
 
-        log.debug("Applied op to server CRDT. Document text for doc={}: '{}'",
-                docId, crdtService.getText(docId));
+        // Step 2 — Persist to PostgreSQL
+        // Saves the op to the operations table BEFORE broadcasting.
+        // If this throws (DB down, constraint violation, etc.) the broadcast
+        // is skipped — clients stay in sync with what was actually persisted.
+        operationService.persist(docId, op);
 
-        // Step 2 — Broadcast the op to every client subscribed to this document.
-        // All clients apply this op to their own local CRDT and re-render.
+        log.debug("Persisted op. Doc text now: '{}'", crdtService.getText(docId));
+
+        // Step 3 — Broadcast to all subscribers of this document
+        // All connected clients apply this op to their local CRDTs.
         messagingTemplate.convertAndSend("/topic/document/" + docId, op);
 
         log.debug("Broadcasted op to /topic/document/{}", docId);
