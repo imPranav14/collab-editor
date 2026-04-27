@@ -1,11 +1,11 @@
 package com.pranav.collab_editor.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import com.pranav.collab_editor.dto.CursorDTO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -116,6 +116,7 @@ public class PresenceService {
     private static final int CURSOR_TTL_SECONDS = 30;
 
     @Autowired
+    @Qualifier("redisTemplate")
     private RedisTemplate<String, String> redis;
 
     @Autowired
@@ -153,7 +154,7 @@ public class PresenceService {
             log.debug("Updated cursor: doc={} userId={} line={} ch={} lastSeen={}",
                     docId, userId, cursor.getLine(), cursor.getCh(), nowEpochSec);
 
-        } catch (JsonProcessingException e) {
+        } catch (Exception e) {
             log.error("Failed to serialize cursor for userId={} doc={}", userId, docId, e);
         }
     }
@@ -256,7 +257,7 @@ public class PresenceService {
             try {
                 CursorDTO cursor = objectMapper.readValue((String) raw, CursorDTO.class);
                 cursors.add(cursor);
-            } catch (JsonProcessingException e) {
+            } catch (Exception e) {
                 log.warn("Failed to deserialize cursor JSON in doc={}: {}", docId, raw, e);
             }
         }
