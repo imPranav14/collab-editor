@@ -2,6 +2,7 @@ package com.pranav.collab_editor.controller;
 
 import com.pranav.collab_editor.dto.DocumentLoadResponse;
 import com.pranav.collab_editor.model.Document;
+import com.pranav.collab_editor.model.DocumentShare;
 import com.pranav.collab_editor.model.Operation;
 import com.pranav.collab_editor.model.User;
 import com.pranav.collab_editor.service.CRDTService;
@@ -187,6 +188,60 @@ public class DocumentController {
         );
 
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Shares a document with another user.
+     *
+     * POST /api/documents/{id}/share
+     * Body: { "targetUserId": "user-uuid", "permission": "EDIT" }
+     */
+    @PostMapping("/{id}/share")
+    public ResponseEntity<DocumentShare> shareDocument(
+            @PathVariable String id,
+            @Valid @RequestBody DocumentService.ShareDocumentRequest request,
+            @AuthenticationPrincipal User user) {
+        try {
+            DocumentShare share = documentService.shareDocument(user, id, request.targetUserId(), request.permission());
+            return ResponseEntity.status(HttpStatus.CREATED).body(share);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().build();
+        }
+    }
+
+    /**
+     * Gets all shares for a document (only document owner can view).
+     *
+     * GET /api/documents/{id}/shares
+     */
+    @GetMapping("/{id}/shares")
+    public ResponseEntity<List<DocumentShare>> getDocumentShares(
+            @PathVariable String id,
+            @AuthenticationPrincipal User user) {
+        try {
+            List<DocumentShare> shares = documentService.getDocumentShares(id, user);
+            return ResponseEntity.ok(shares);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /**
+     * Revokes sharing of a document with a user.
+     *
+     * DELETE /api/documents/{id}/share/{userId}
+     */
+    @DeleteMapping("/{id}/share/{userId}")
+    public ResponseEntity<Void> revokeShare(
+            @PathVariable String id,
+            @PathVariable String userId,
+            @AuthenticationPrincipal User user) {
+        try {
+            documentService.revokeShare(user, id, userId);
+            return ResponseEntity.noContent().build();
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
     }
 
     /**

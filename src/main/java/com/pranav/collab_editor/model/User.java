@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
@@ -13,6 +14,7 @@ import java.util.List;
 @Table(name = "users")
 @Data
 @NoArgsConstructor
+@ToString(exclude = "documents")
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
